@@ -28,6 +28,7 @@ const FALLBACK_LOCK_DIR_NAME = '.filesystem-lifecycle.lock';
 const runningScheduledSweeps = new Set<string>();
 const lastScheduledAtByScope = new Map<string, number>();
 const lastScheduledAtByPreKey = new Map<string, number>();
+const scheduledSweepTimers = new Set<ReturnType<typeof setTimeout>>();
 
 const HELPER_PID_PATTERN = /(?:^|_)helperpid(\d+)(?:_|\.|$)/g;
 const ISO_TIMESTAMP_PATTERN = '\\d{4}-\\d{2}-\\d{2}T\\d{2}-\\d{2}-\\d{2}-\\d{3}Z';
@@ -638,9 +639,11 @@ export function scheduleWorkspaceFilesystemLifecycleSweep(
         log('warn', `[FilesystemLifecycle] Cleanup failed: ${message}`);
       })
       .finally(() => {
+        scheduledSweepTimers.delete(timer);
         runningScheduledSweeps.delete(scheduleKey);
       });
   }, WORKSPACE_FILESYSTEM_LIFECYCLE_SCHEDULE_DELAY_MS);
+  scheduledSweepTimers.add(timer);
   timer.unref?.();
 }
 
@@ -703,6 +706,10 @@ export function terminateOwnedWorkspaceFilesystemArtifactsSync(): {
 }
 
 export function resetWorkspaceFilesystemLifecycleStateForTests(): void {
+  for (const timer of scheduledSweepTimers) {
+    clearTimeout(timer);
+  }
+  scheduledSweepTimers.clear();
   runningScheduledSweeps.clear();
   lastScheduledAtByScope.clear();
   lastScheduledAtByPreKey.clear();

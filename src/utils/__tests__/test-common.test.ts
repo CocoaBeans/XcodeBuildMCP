@@ -14,6 +14,7 @@ import {
   setXcodeBuildMCPAppDirOverrideForTests,
 } from '../log-paths.ts';
 import { setRuntimeInstanceForTests } from '../runtime-instance.ts';
+import { resetWorkspaceFilesystemLifecycleStateForTests } from '../workspace-filesystem-lifecycle.ts';
 
 function createSuccessfulCommandResponse(): CommandResponse {
   return {
@@ -115,6 +116,7 @@ describe('createTestExecutor', () => {
   });
 
   afterEach(() => {
+    resetWorkspaceFilesystemLifecycleStateForTests();
     setXcodeBuildMCPAppDirOverrideForTests(null);
     setRuntimeInstanceForTests(null);
     rmSync(tempAppDir, { recursive: true, force: true });

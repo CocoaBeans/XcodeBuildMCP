@@ -25,6 +25,7 @@ import {
 import { setSimulatorLaunchOsLogRecordActiveOverrideForTests } from '../log-capture/simulator-launch-oslog-registry.ts';
 
 let appDir: string;
+const DEAD_OWNER_PID = 999_999_999;
 
 function writeFileWithMtime(filePath: string, content: string, mtimeMs: number): void {
   mkdirSync(path.dirname(filePath), { recursive: true });
@@ -37,7 +38,7 @@ function managedXcodebuildLogName(name = 'build_sim'): string {
   return `${name}_2026-05-02T12-00-00-000Z_pid123_abcdef12.log`;
 }
 
-function managedResultBundleName(name = 'test', pid = 123): string {
+function managedResultBundleName(name = 'test', pid = DEAD_OWNER_PID): string {
   return `${name}_2026-05-02T12-00-00-000Z_pid${pid}_abcdef12.xcresult`;
 }
 
