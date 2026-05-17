@@ -1,5 +1,9 @@
 import { describe, it, expect } from 'vitest';
-import { renderNextStep, renderNextStepsSection } from '../next-steps-renderer.ts';
+import {
+  processToolResponse,
+  renderNextStep,
+  renderNextStepsSection,
+} from '../next-steps-renderer.ts';
 import type { NextStep } from '../../../types/common.ts';
 
 describe('next-steps-renderer', () => {
@@ -28,7 +32,7 @@ describe('next-steps-renderer', () => {
 
       const result = renderNextStep(step, 'cli');
       expect(result).toBe(
-        'Install an app: xcodebuildmcp simulator install-app-sim --simulator-id "ABC123" --app-path "/path/to/app"',
+        'Install an app: xcodebuildmcp simulator install-app-sim --simulator-id ABC123 --app-path /path/to/app',
       );
     });
 
@@ -43,7 +47,7 @@ describe('next-steps-renderer', () => {
 
       const result = renderNextStep(step, 'cli');
       expect(result).toBe(
-        'Install an app: xcodebuildmcp simulator install-app --simulator-id "ABC123"',
+        'Install an app: xcodebuildmcp simulator install-app --simulator-id ABC123',
       );
     });
 
@@ -90,6 +94,40 @@ describe('next-steps-renderer', () => {
 
       const result = renderNextStep(step, 'cli');
       expect(result).toBe('Do something: xcodebuildmcp some-tool');
+    });
+
+    it('should shell-escape CLI text params that start with a dash', () => {
+      const step: NextStep = {
+        tool: 'test_sim',
+        cliTool: 'test',
+        workflow: 'simulator',
+        label: 'Run focused test',
+        params: { extraArg: '-only-testing:AppTests' },
+      };
+
+      const result = renderNextStep(step, 'cli');
+      expect(result).toBe(
+        "Run focused test: xcodebuildmcp simulator test --extra-arg '-only-testing:AppTests'",
+      );
+    });
+
+    it('should shell-escape CLI text params that contain shell metacharacters', () => {
+      const step: NextStep = {
+        tool: 'launch_app_sim',
+        cliTool: 'launch-app',
+        workflow: 'simulator',
+        label: 'Launch app',
+        params: {
+          simulatorName: 'Cam "Debug" App',
+          bundleId: 'com.example.$APP\\debug',
+          launchArg: 'line1\nline2',
+        },
+      };
+
+      const result = renderNextStep(step, 'cli');
+      expect(result).toBe(
+        "Launch app: xcodebuildmcp simulator launch-app --simulator-name 'Cam \"Debug\" App' --bundle-id 'com.example.$APP\\debug' --launch-arg 'line1\nline2'",
+      );
     });
 
     it('should format step for MCP with no params', () => {
@@ -147,6 +185,20 @@ describe('next-steps-renderer', () => {
       expect(result).toBe('Open the Simulator app: open_sim()');
     });
 
+    it('trims label whitespace before rendering command steps', () => {
+      const step: NextStep = {
+        tool: 'boot_sim',
+        cliTool: 'boot',
+        workflow: 'simulator',
+        label: '  Boot simulator  ',
+        params: { simulatorId: 'SIM-1' },
+      };
+
+      expect(renderNextStep(step, 'cli')).toBe(
+        'Boot simulator: xcodebuildmcp simulator boot --simulator-id SIM-1',
+      );
+    });
+
     it('should render label-only step as plain text', () => {
       const step: NextStep = {
         label: 'Verify layout visually before continuing',
@@ -154,6 +206,42 @@ describe('next-steps-renderer', () => {
 
       expect(renderNextStep(step, 'cli')).toBe('Verify layout visually before continuing');
       expect(renderNextStep(step, 'mcp')).toBe('Verify layout visually before continuing');
+    });
+  });
+
+  describe('processToolResponse', () => {
+    it('appends next steps to the last text content item even when a non-text item follows', () => {
+      const result = processToolResponse(
+        {
+          content: [
+            { type: 'text', text: 'Initial text' },
+            { type: 'image', data: 'base64', mimeType: 'image/png' },
+          ],
+          nextSteps: [{ tool: 'open_sim', label: 'Open Simulator' }],
+        },
+        'mcp',
+      );
+
+      expect(result.content).toEqual([
+        { type: 'text', text: 'Initial text\n\nNext steps:\n1. Open Simulator: open_sim()' },
+        { type: 'image', data: 'base64', mimeType: 'image/png' },
+      ]);
+      expect(result).not.toHaveProperty('nextSteps');
+    });
+
+    it('adds a new text item when no text content exists', () => {
+      const result = processToolResponse(
+        {
+          content: [{ type: 'image', data: 'base64', mimeType: 'image/png' }],
+          nextSteps: [{ tool: 'open_sim', label: 'Open Simulator' }],
+        },
+        'mcp',
+      );
+
+      expect(result.content).toEqual([
+        { type: 'image', data: 'base64', mimeType: 'image/png' },
+        { type: 'text', text: 'Next steps:\n1. Open Simulator: open_sim()' },
+      ]);
     });
   });
 
@@ -178,7 +266,7 @@ describe('next-steps-renderer', () => {
       expect(result).toBe(
         'Next steps:\n' +
           '1. Open Simulator: xcodebuildmcp open-sim\n' +
-          '2. Install app: xcodebuildmcp install-app-sim --simulator-id "X"',
+          '2. Install app: xcodebuildmcp install-app-sim --simulator-id X',
       );
     });
 
@@ -196,17 +284,17 @@ describe('next-steps-renderer', () => {
       );
     });
 
-    it('should keep declared order', () => {
+    it('should sort by priority', () => {
       const steps: NextStep[] = [
-        { tool: 'third', label: 'Third', params: {} },
-        { tool: 'first', label: 'First', params: {} },
-        { tool: 'second', label: 'Second', params: {} },
+        { tool: 'third', label: 'Third', params: {}, priority: 3 },
+        { tool: 'first', label: 'First', params: {}, priority: 1 },
+        { tool: 'second', label: 'Second', params: {}, priority: 2 },
       ];
 
       const result = renderNextStepsSection(steps, 'mcp');
-      expect(result).toContain('1. Third: third()');
-      expect(result).toContain('2. First: first()');
-      expect(result).toContain('3. Second: second()');
+      expect(result).toContain('1. First: first()');
+      expect(result).toContain('2. Second: second()');
+      expect(result).toContain('3. Third: third()');
     });
 
     it('should render label-only next step without command', () => {

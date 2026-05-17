@@ -5,9 +5,18 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object';
 }
 
-function normalizeString(value: string, key?: string, path: string[] = []): string {
+function normalizeBaseString(value: string): string {
   const normalized = normalizeSnapshotOutput(value.replace(/\u00A0/g, ' '));
-  let result = normalized.endsWith('\n') ? normalized.slice(0, -1) : normalized;
+  return normalized.endsWith('\n') ? normalized.slice(0, -1) : normalized;
+}
+
+function normalizeString(value: string, key?: string, path: string[] = []): string {
+  const parentKey = path.at(-2);
+  let result = normalizeBaseString(value);
+
+  if (parentKey === 'stderr') {
+    result = result.replace(/^\[\d+\/\d+\] /, '[<STEP>] ');
+  }
 
   if (key === 'rawResponseJsonPath') {
     return '<RAW_RESPONSE_JSON_PATH>';
@@ -27,6 +36,10 @@ function normalizeString(value: string, key?: string, path: string[] = []): stri
   // Replace with a stable placeholder.
   if (key === 'state' && path.includes('simulators')) {
     return '<SIM_STATE>';
+  }
+
+  if (key === 'osVersion' && path.includes('devices')) {
+    return '<OS_VERSION>';
   }
 
   return result;
@@ -58,8 +71,115 @@ function normalizeNumber(path: string[], key: string | undefined, value: number)
   }
 }
 
-function isBuildSettingsPathEntry(value: Record<string, unknown>, path: string[]): boolean {
-  return path.includes('entries') && value.key === 'PATH' && typeof value.value === 'string';
+function isBuildSettingsEntry(value: Record<string, unknown>, path: string[]): boolean {
+  return (
+    path.includes('entries') && typeof value.key === 'string' && typeof value.value === 'string'
+  );
+}
+
+function normalizeBuildSettingsEntryKey(key: string): string {
+  if (key.startsWith('SDK_DIR_')) {
+    return 'SDK_DIR_<SDK_NAME>';
+  }
+
+  return key;
+}
+
+function normalizeBuildSettingsEntryValue(key: string, value: string): string {
+  if (key === 'SDKROOT' || key === 'SDK_DIR' || key.startsWith('SDK_DIR_')) {
+    return '<SDK_PATH>';
+  }
+
+  switch (key) {
+    case 'PATH':
+      return '<PATH_ENTRIES>';
+    case 'ALTERNATE_OWNER':
+    case 'INSTALL_OWNER':
+    case 'USER':
+    case 'VERSION_INFO_BUILDER':
+      return '<USER>';
+    case 'UID':
+      return '<UID>';
+    case 'GID':
+      return '<GID>';
+    case 'ALTERNATE_GROUP':
+    case 'GROUP':
+    case 'INSTALL_GROUP':
+      return '<GROUP>';
+    case 'CACHE_ROOT':
+    case 'CCHROOT':
+      return '<XCODE_CACHE_ROOT>';
+    case 'CORRESPONDING_SIMULATOR_SDK_DIR':
+      return '<SDK_PATH>';
+    case 'CORRESPONDING_SIMULATOR_SDK_NAME':
+    case 'SDK_NAME':
+    case 'SDK_NAMES':
+      return '<SDK_NAME>';
+    case 'PLATFORM_PRODUCT_BUILD_VERSION':
+    case 'SDK_PRODUCT_BUILD_VERSION':
+    case 'MAC_OS_X_PRODUCT_BUILD_VERSION':
+      return '<SDK_BUILD_VERSION>';
+    case 'SDK_STAT_CACHE_PATH':
+      return '<SDK_STAT_CACHE_PATH>';
+    case 'SDK_VERSION':
+    case 'SDK_VERSION_ACTUAL':
+    case 'SDK_VERSION_MAJOR':
+    case 'SDK_VERSION_MINOR':
+    case 'MAC_OS_X_VERSION_ACTUAL':
+    case 'MAC_OS_X_VERSION_MAJOR':
+    case 'MAC_OS_X_VERSION_MINOR':
+      return '<SDK_VERSION>';
+    case 'TARGET_DEVICE_MODEL':
+    case 'ASSETCATALOG_FILTER_FOR_DEVICE_MODEL':
+      return '<DEVICE_MODEL>';
+    case 'TARGET_DEVICE_OS_VERSION':
+    case 'ASSETCATALOG_FILTER_FOR_DEVICE_OS_VERSION':
+      return '<OS_VERSION>';
+    default:
+      return normalizeBaseString(value);
+  }
+}
+
+function isNormalizedTestCase(
+  value: unknown,
+): value is { status?: unknown; suite?: string; test?: string } {
+  return isRecord(value) && typeof value.status === 'string';
+}
+
+function testCaseSortKey(item: unknown): string {
+  const record = item as { suite?: string; test?: string };
+  return `${record.suite ?? ''}|${record.test ?? ''}`;
+}
+
+function normalizeTestCases(items: unknown[]): unknown[] {
+  const sorted = [...items].sort((a, b) => testCaseSortKey(a).localeCompare(testCaseSortKey(b)));
+  const failed = sorted.filter((item) => isNormalizedTestCase(item) && item.status === 'failed');
+
+  return failed.length > 0 ? failed : sorted;
+}
+
+function normalizeStderrLines(items: unknown[]): unknown[] {
+  const normalized: unknown[] = [];
+  let stepRun: string[] = [];
+
+  const flushStepRun = (): void => {
+    if (stepRun.length === 0) return;
+    normalized.push(...stepRun.sort((left, right) => left.localeCompare(right)));
+    stepRun = [];
+  };
+
+  for (const item of items) {
+    if (typeof item === 'string' && item.startsWith('[<STEP>] ')) {
+      stepRun.push(item);
+      continue;
+    }
+
+    flushStepRun();
+    normalized.push(item);
+  }
+
+  flushStepRun();
+  return normalized;
 }
 
 function normalizeValue(value: unknown, path: string[] = []): unknown {
@@ -75,23 +195,28 @@ function normalizeValue(value: unknown, path: string[] = []): unknown {
 
   if (Array.isArray(value)) {
     const normalized = value.map((item, index) => normalizeValue(item, [...path, String(index)]));
-    if (path.at(-1) === 'testCases') {
-      return [...normalized].sort((a, b) => {
-        const ka = `${(a as { suite?: string }).suite ?? ''}|${(a as { test?: string }).test ?? ''}`;
-        const kb = `${(b as { suite?: string }).suite ?? ''}|${(b as { test?: string }).test ?? ''}`;
-        return ka.localeCompare(kb);
-      });
+    if (key === 'testCases') {
+      return normalizeTestCases(normalized);
+    }
+    if (key === 'stderr') {
+      return normalizeStderrLines(normalized);
     }
     return normalized;
   }
 
   if (isRecord(value)) {
-    const normalizedEntries = Object.entries(value).map(([entryKey, entryValue]) => [
-      entryKey,
-      isBuildSettingsPathEntry(value, path) && entryKey === 'value'
-        ? '<PATH_ENTRIES>'
-        : normalizeValue(entryValue, [...path, entryKey]),
-    ]);
+    const isBuildSetting = isBuildSettingsEntry(value, path);
+    const normalizedEntries = Object.entries(value).map(([entryKey, entryValue]) => {
+      if (isBuildSetting && entryKey === 'key') {
+        return [entryKey, normalizeBuildSettingsEntryKey(String(entryValue))];
+      }
+
+      if (isBuildSetting && entryKey === 'value') {
+        return [entryKey, normalizeBuildSettingsEntryValue(String(value.key), String(value.value))];
+      }
+
+      return [entryKey, normalizeValue(entryValue, [...path, entryKey])];
+    });
 
     return Object.fromEntries(normalizedEntries);
   }
@@ -129,10 +254,13 @@ export function normalizeStructuredEnvelope(
   ) as StructuredOutputEnvelope<unknown>;
 }
 
+const FRAME_OBJECT_REGEX =
+  /"frame": \{\n\s+"y": (?<y>\d+(?:\.\d+)?),\n\s+"x": (?<x>\d+(?:\.\d+)?),\n\s+"width": (?<width>\d+(?:\.\d+)?),\n\s+"height": (?<height>\d+(?:\.\d+)?)\n\s+\}/g;
+
 function compactFrameObjects(json: string): string {
   return json.replace(
-    /"frame": \{\n\s+"x": (\d+(?:\.\d+)?),\n\s+"y": (\d+(?:\.\d+)?),\n\s+"width": (\d+(?:\.\d+)?),\n\s+"height": (\d+(?:\.\d+)?)\n\s+\}/g,
-    '"frame": { "x": $1, "y": $2, "width": $3, "height": $4 }',
+    FRAME_OBJECT_REGEX,
+    '"frame": { "x": $<x>, "y": $<y>, "width": $<width>, "height": $<height> }',
   );
 }
 
