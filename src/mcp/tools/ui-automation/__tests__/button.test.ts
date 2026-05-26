@@ -16,6 +16,16 @@ import {
   simulatorId,
 } from './ui-action-test-helpers.ts';
 
+function createImmediatePostActionTiming() {
+  let nowMs = 0;
+  return {
+    now: () => nowMs,
+    sleep: async (durationMs: number) => {
+      nowMs += durationMs;
+    },
+  };
+}
+
 describe('Button Plugin', () => {
   beforeEach(() => {
     __resetRuntimeSnapshotStoreForTests();
@@ -215,13 +225,23 @@ describe('Button Plugin', () => {
   describe('Executor Behavior', () => {
     it('captures a fresh runtime snapshot after a successful button press', async () => {
       const { calls, executor } = createTrackingExecutor();
-      const executeButton = createButtonExecutor(executor, createMockAxeHelpers(), undefined, 0);
+      const executeButton = createButtonExecutor(
+        executor,
+        createMockAxeHelpers(),
+        undefined,
+        0,
+        createImmediatePostActionTiming(),
+      );
 
       const result = await executeButton({ simulatorId, buttonType: 'home' });
 
       expect(result.didError).toBe(false);
       expect(result.capture).toMatchObject({ type: 'runtime-snapshot', simulatorId });
-      expect(calls.map((call) => call.command[1])).toEqual(['button', 'describe-ui']);
+      expect(calls.map((call) => call.command[1])).toEqual([
+        'button',
+        'describe-ui',
+        'describe-ui',
+      ]);
     });
 
     it('waits briefly after successful button presses so system UI transitions can settle', async () => {
@@ -239,7 +259,13 @@ describe('Button Plugin', () => {
           getBundledAxeEnvironment: () => ({}),
         };
 
-        const executeButton = createButtonExecutor(mockExecutor, mockAxeHelpers, undefined, 500);
+        const executeButton = createButtonExecutor(
+          mockExecutor,
+          mockAxeHelpers,
+          undefined,
+          500,
+          createImmediatePostActionTiming(),
+        );
         let settled = false;
         const resultPromise = executeButton({
           simulatorId: '12345678-1234-4234-8234-123456789012',

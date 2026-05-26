@@ -19,6 +19,16 @@ function createDefaultMockAxeHelpers() {
   };
 }
 
+function createImmediatePostActionTiming() {
+  let nowMs = 0;
+  return {
+    now: () => nowMs,
+    sleep: async (durationMs: number) => {
+      nowMs += durationMs;
+    },
+  };
+}
+
 describe('Key Press Tool', () => {
   beforeEach(() => {
     sessionStore.clear();
@@ -186,13 +196,18 @@ describe('Key Press Tool', () => {
 
     it('captures a fresh runtime snapshot after a successful key press', async () => {
       const { calls, executor } = createTrackingExecutor();
-      const executeKeyPress = createKeyPressExecutor(executor, createMockAxeHelpers());
+      const executeKeyPress = createKeyPressExecutor(
+        executor,
+        createMockAxeHelpers(),
+        undefined,
+        createImmediatePostActionTiming(),
+      );
 
       const result = await executeKeyPress({ simulatorId, keyCode: 40 });
 
       expect(result.didError).toBe(false);
       expect(result.capture).toMatchObject({ type: 'runtime-snapshot', simulatorId });
-      expect(calls.map((call) => call.command[1])).toEqual(['key', 'describe-ui']);
+      expect(calls.map((call) => call.command[1])).toEqual(['key', 'describe-ui', 'describe-ui']);
     });
 
     it('should return success for valid key press execution', async () => {
