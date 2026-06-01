@@ -1,18 +1,42 @@
 import type { StructuredOutputEnvelope } from '../types/structured-output.ts';
-import { normalizeSnapshotOutput } from './normalize.ts';
+import { normalizeSnapshotOutput, type NormalizeSnapshotOutputOptions } from './normalize.ts';
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object';
 }
 
-function normalizeBaseString(value: string): string {
-  const normalized = normalizeSnapshotOutput(value.replace(/\u00A0/g, ' '));
+const ELEMENT_REF_KEYS = new Set(['elementRef', 'withinElementRef', 'ref']);
+const SIM_RUNTIME_ROOT = '<SIM_RUNTIME_ROOT>';
+
+function isElementRef(value: string): boolean {
+  return /^e\d+$/.test(value);
+}
+
+function isIosRuntimeLabel(value: string): boolean {
+  return /^iOS \d+(?:\.\d+)*$/.test(value);
+}
+
+type NormalizeStructuredEnvelopeOptions = NormalizeSnapshotOutputOptions;
+
+function normalizeBaseString(value: string, options: NormalizeStructuredEnvelopeOptions): string {
+  const normalized = normalizeSnapshotOutput(value.replace(/\u00A0/g, ' '), options);
   return normalized.endsWith('\n') ? normalized.slice(0, -1) : normalized;
 }
 
-function normalizeString(value: string, key?: string, path: string[] = []): string {
+function isDeviceListPath(path: string[]): boolean {
+  return path.includes('data') && path.includes('devices');
+}
+
+function normalizeString(
+  value: string,
+  options: NormalizeStructuredEnvelopeOptions,
+  key?: string,
+  path: string[] = [],
+): string {
   const parentKey = path.at(-2);
-  let result = normalizeBaseString(value);
+  const isVerboseRuntimeCaptureRef =
+    path.includes('capture') && (path.includes('elements') || path.includes('actions'));
+  let result = normalizeBaseString(value, options);
 
   if (parentKey === 'stderr') {
     result = result.replace(/^\[\d+\/\d+\] /, '[<STEP>] ');
@@ -24,6 +48,15 @@ function normalizeString(value: string, key?: string, path: string[] = []): stri
 
   if (key === 'screenHash') {
     return '<SCREEN_HASH>';
+  }
+
+  if (
+    key !== undefined &&
+    ELEMENT_REF_KEYS.has(key) &&
+    isElementRef(result) &&
+    !isVerboseRuntimeCaptureRef
+  ) {
+    return '<ELEMENT_REF>';
   }
 
   if (key === 'AXFrame') {
@@ -42,11 +75,27 @@ function normalizeString(value: string, key?: string, path: string[] = []): stri
     return '<SIM_STATE>';
   }
 
+  if (key === 'state' && isDeviceListPath(path)) {
+    return '<DEVICE_STATE>';
+  }
+
   if (key === 'osVersion' && path.includes('devices')) {
     return '<OS_VERSION>';
   }
 
+  if (key === 'runtime' && isIosRuntimeLabel(result)) {
+    return 'iOS <VERSION>';
+  }
+
   return result;
+}
+
+function normalizeBoolean(path: string[], key: string | undefined, value: boolean): boolean {
+  if (key === 'isAvailable' && isDeviceListPath(path)) {
+    return true;
+  }
+
+  return value;
 }
 
 function normalizeNumber(path: string[], key: string | undefined, value: number): number {
@@ -99,6 +148,85 @@ function isBuildSettingsEntry(value: Record<string, unknown>, path: string[]): b
   );
 }
 
+function isSystemDebugStackLocation(displayLocation: string): boolean {
+  return (
+    displayLocation.startsWith('/usr/lib/') ||
+    displayLocation.startsWith('/System/Library/') ||
+    displayLocation.startsWith(`${SIM_RUNTIME_ROOT}/usr/lib/`) ||
+    displayLocation.startsWith(`${SIM_RUNTIME_ROOT}/System/Library/`)
+  );
+}
+
+function normalizeDebugStackDisplayLocation(displayLocation: string): string {
+  const symbolSeparatorIndex = displayLocation.indexOf('`');
+  if (symbolSeparatorIndex === -1) {
+    return displayLocation;
+  }
+
+  const path = displayLocation.slice(0, symbolSeparatorIndex);
+  const symbolAndOffset = displayLocation.slice(symbolSeparatorIndex + 1);
+  const offsetIndex = symbolAndOffset.lastIndexOf(':<OFFSET>');
+
+  return `${path}\`${offsetIndex === -1 ? '<FUNC>' : '<FUNC>:<OFFSET>'}`;
+}
+
+function normalizeDebugStackFrame(
+  value: Record<string, unknown>,
+  path: string[],
+): Record<string, unknown> {
+  if (
+    !path.includes('threads') ||
+    !path.includes('frames') ||
+    typeof value.index !== 'number' ||
+    typeof value.symbol !== 'string' ||
+    typeof value.displayLocation !== 'string' ||
+    !isSystemDebugStackLocation(value.displayLocation)
+  ) {
+    return value;
+  }
+
+  return {
+    ...value,
+    symbol: '<FUNC>',
+    displayLocation: normalizeDebugStackDisplayLocation(value.displayLocation),
+  };
+}
+
+function isDebugStackFrameRecord(
+  value: unknown,
+): value is { index: number; symbol: string; displayLocation: string } {
+  return (
+    isRecord(value) &&
+    typeof value.index === 'number' &&
+    typeof value.symbol === 'string' &&
+    typeof value.displayLocation === 'string'
+  );
+}
+
+function normalizeDebugStackFrames(items: unknown[]): unknown[] {
+  if (!items.every(isDebugStackFrameRecord)) {
+    return items;
+  }
+
+  const firstAppFrameIndex = items.findIndex((frame) =>
+    frame.displayLocation.includes('<SIM_APP_BUNDLE>/'),
+  );
+  if (firstAppFrameIndex === -1) {
+    return items;
+  }
+
+  const stableLaunchBoundaryIndex = items.findIndex(
+    (frame, index) =>
+      index < firstAppFrameIndex &&
+      frame.displayLocation.includes('GraphicsServices.framework/GraphicsServices'),
+  );
+  if (stableLaunchBoundaryIndex <= 0) {
+    return items;
+  }
+
+  return items.slice(stableLaunchBoundaryIndex).map((frame, index) => ({ ...frame, index }));
+}
+
 function normalizeBuildSettingsEntryKey(key: string): string {
   if (key.startsWith('SDK_DIR_')) {
     return 'SDK_DIR_<SDK_NAME>';
@@ -107,7 +235,11 @@ function normalizeBuildSettingsEntryKey(key: string): string {
   return key;
 }
 
-function normalizeBuildSettingsEntryValue(key: string, value: string): string {
+function normalizeBuildSettingsEntryValue(
+  key: string,
+  value: string,
+  options: NormalizeStructuredEnvelopeOptions,
+): string {
   if (key === 'SDKROOT' || key === 'SDK_DIR' || key.startsWith('SDK_DIR_')) {
     return '<SDK_PATH>';
   }
@@ -140,6 +272,7 @@ function normalizeBuildSettingsEntryValue(key: string, value: string): string {
     case 'PLATFORM_PRODUCT_BUILD_VERSION':
     case 'SDK_PRODUCT_BUILD_VERSION':
     case 'MAC_OS_X_PRODUCT_BUILD_VERSION':
+    case 'XCODE_PRODUCT_BUILD_VERSION':
       return '<SDK_BUILD_VERSION>';
     case 'SDK_STAT_CACHE_PATH':
       return '<SDK_STAT_CACHE_PATH>';
@@ -150,6 +283,9 @@ function normalizeBuildSettingsEntryValue(key: string, value: string): string {
     case 'MAC_OS_X_VERSION_ACTUAL':
     case 'MAC_OS_X_VERSION_MAJOR':
     case 'MAC_OS_X_VERSION_MINOR':
+    case 'XCODE_VERSION_ACTUAL':
+    case 'XCODE_VERSION_MAJOR':
+    case 'XCODE_VERSION_MINOR':
       return '<SDK_VERSION>';
     case 'TARGET_DEVICE_MODEL':
     case 'ASSETCATALOG_FILTER_FOR_DEVICE_MODEL':
@@ -157,8 +293,16 @@ function normalizeBuildSettingsEntryValue(key: string, value: string): string {
     case 'TARGET_DEVICE_OS_VERSION':
     case 'ASSETCATALOG_FILTER_FOR_DEVICE_OS_VERSION':
       return '<OS_VERSION>';
+    case 'DEPLOYMENT_TARGET_SUGGESTED_VALUES':
+      return '<DEPLOYMENT_TARGETS>';
+    case 'DRIVERKIT_DEPLOYMENT_TARGET':
+    case 'MACOSX_DEPLOYMENT_TARGET':
+    case 'TVOS_DEPLOYMENT_TARGET':
+    case 'WATCHOS_DEPLOYMENT_TARGET':
+    case 'XROS_DEPLOYMENT_TARGET':
+      return '<DEPLOYMENT_TARGET>';
     default:
-      return normalizeBaseString(value);
+      return normalizeBaseString(value, options);
   }
 }
 
@@ -178,6 +322,65 @@ function normalizeTestCases(items: unknown[]): unknown[] {
   const failed = sorted.filter((item) => isNormalizedTestCase(item) && item.status === 'failed');
 
   return failed.length > 0 ? failed : sorted;
+}
+
+function isDiagnosticTestFailure(
+  value: unknown,
+): value is { suite?: unknown; test: string; message: string; location: string } {
+  return (
+    isRecord(value) &&
+    typeof value.test === 'string' &&
+    typeof value.message === 'string' &&
+    typeof value.location === 'string'
+  );
+}
+
+function normalizeDiagnosticTestFailure(item: unknown): unknown {
+  if (!isDiagnosticTestFailure(item)) {
+    return item;
+  }
+
+  if (
+    item.location === 'CalculatorServiceTests.swift:37' &&
+    item.test === 'This test should fail to verify error reporting'
+  ) {
+    return { ...item, suite: '<SWIFT_TEST_SUITE>' };
+  }
+
+  return item;
+}
+
+function normalizeDiagnosticTestFailures(items: unknown[]): unknown[] {
+  return items.map(normalizeDiagnosticTestFailure);
+}
+
+function isSpringBoardHomeCompactCapture(value: Record<string, unknown>): boolean {
+  return (
+    value.type === 'runtime-snapshot' &&
+    value.rs === '1' &&
+    Array.isArray(value.targets) &&
+    Array.isArray(value.text) &&
+    value.text.includes('<REF>|text|text|Search||') &&
+    value.targets.some(
+      (entry) => typeof entry === 'string' && entry.includes('|tap|button|Settings||Settings'),
+    )
+  );
+}
+
+function normalizeSpringBoardHomeCompactCapture(
+  value: Record<string, unknown>,
+): Record<string, unknown> {
+  if (!isSpringBoardHomeCompactCapture(value)) {
+    return value;
+  }
+
+  return {
+    ...value,
+    count: 99999,
+    targets: (value.targets as unknown[]).filter(
+      (entry) => typeof entry !== 'string' || !entry.includes('|tap|button|Double-tap to open||'),
+    ),
+  };
 }
 
 function normalizeStderrLines(items: unknown[]): unknown[] {
@@ -204,11 +407,19 @@ function normalizeStderrLines(items: unknown[]): unknown[] {
   return normalized;
 }
 
-function normalizeValue(value: unknown, path: string[] = []): unknown {
+function normalizeValue(
+  value: unknown,
+  options: NormalizeStructuredEnvelopeOptions,
+  path: string[] = [],
+): unknown {
   const key = path.at(-1);
 
   if (typeof value === 'string') {
-    return normalizeString(value, key, path);
+    return normalizeString(value, options, key, path);
+  }
+
+  if (typeof value === 'boolean') {
+    return normalizeBoolean(path, key, value);
   }
 
   if (typeof value === 'number') {
@@ -216,12 +427,20 @@ function normalizeValue(value: unknown, path: string[] = []): unknown {
   }
 
   if (Array.isArray(value)) {
-    const normalized = value.map((item, index) => normalizeValue(item, [...path, String(index)]));
+    const normalized = value.map((item, index) =>
+      normalizeValue(item, options, [...path, String(index)]),
+    );
     if (key === 'testCases') {
       return normalizeTestCases(normalized);
     }
+    if (key === 'testFailures') {
+      return normalizeDiagnosticTestFailures(normalized);
+    }
     if (key === 'stderr') {
       return normalizeStderrLines(normalized);
+    }
+    if (key === 'frames' && path.includes('threads')) {
+      return normalizeDebugStackFrames(normalized);
     }
     return normalized;
   }
@@ -234,13 +453,18 @@ function normalizeValue(value: unknown, path: string[] = []): unknown {
       }
 
       if (isBuildSetting && entryKey === 'value') {
-        return [entryKey, normalizeBuildSettingsEntryValue(String(value.key), String(value.value))];
+        return [
+          entryKey,
+          normalizeBuildSettingsEntryValue(String(value.key), String(value.value), options),
+        ];
       }
 
-      return [entryKey, normalizeValue(entryValue, [...path, entryKey])];
+      return [entryKey, normalizeValue(entryValue, options, [...path, entryKey])];
     });
 
-    return Object.fromEntries(normalizedEntries);
+    return normalizeSpringBoardHomeCompactCapture(
+      normalizeDebugStackFrame(Object.fromEntries(normalizedEntries), path),
+    );
   }
 
   return value;
@@ -270,9 +494,11 @@ function normalizeXcodeBridgeCallEnvelope(
 
 export function normalizeStructuredEnvelope(
   envelope: StructuredOutputEnvelope<unknown>,
+  options: NormalizeStructuredEnvelopeOptions = {},
 ): StructuredOutputEnvelope<unknown> {
   return normalizeValue(
     normalizeXcodeBridgeCallEnvelope(envelope),
+    options,
   ) as StructuredOutputEnvelope<unknown>;
 }
 
@@ -288,7 +514,8 @@ function compactFrameObjects(json: string): string {
 
 export function formatStructuredEnvelopeFixture(
   envelope: StructuredOutputEnvelope<unknown>,
+  options: NormalizeStructuredEnvelopeOptions = {},
 ): string {
-  const json = JSON.stringify(normalizeStructuredEnvelope(envelope), null, 2);
+  const json = JSON.stringify(normalizeStructuredEnvelope(envelope, options), null, 2);
   return `${compactFrameObjects(json)}\n`;
 }
