@@ -1,5 +1,11 @@
 # Changelog
 
+## [2.6.1]
+
+### Fixed
+
+- Fixed tab bar item discovery so agents can switch `UITabBar` items ([#439](https://github.com/getsentry/XcodeBuildMCP/issues/439), [#441](https://github.com/getsentry/XcodeBuildMCP/pull/441)).
+
 ## [2.6.0]
 
 ### New! Runtime UI automation
@@ -669,4 +675,5 @@ Please note that the UI automation features are an early preview and currently i
 ## [v1.0.1] - 2025-04-02
 - Initial release of XcodeBuildMCP
 - Basic support for building iOS and macOS applications
+
 
