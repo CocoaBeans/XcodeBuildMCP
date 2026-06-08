@@ -286,7 +286,10 @@ export function createScreenshotExecutor(
           log('warn', `${LOG_PREFIX}/screenshot: Image optimization failed, using original PNG`);
           if (returnFormat === 'base64') {
             const base64Image = await fileSystemExecutor.readFile(screenshotPath, 'base64');
-            dependencies.onAttachment?.({ data: base64Image, mimeType: 'image/png' });
+            const runtime = process.env.XCODEBUILDMCP_RUNTIME;
+            if (runtime !== 'cli' && runtime !== 'daemon') {
+              dependencies.onAttachment?.({ data: base64Image, mimeType: 'image/png' });
+            }
             const dimensions = await getImageDimensions(screenshotPath, executor);
 
             try {
@@ -326,7 +329,10 @@ export function createScreenshotExecutor(
 
         if (returnFormat === 'base64') {
           const base64Image = await fileSystemExecutor.readFile(optimizedPath, 'base64');
-          dependencies.onAttachment?.({ data: base64Image, mimeType: 'image/jpeg' });
+          const runtime = process.env.XCODEBUILDMCP_RUNTIME;
+          if (runtime !== 'cli' && runtime !== 'daemon') {
+            dependencies.onAttachment?.({ data: base64Image, mimeType: 'image/jpeg' });
+          }
 
           log('info', `${LOG_PREFIX}/screenshot: Successfully encoded image as Base64`);
 
